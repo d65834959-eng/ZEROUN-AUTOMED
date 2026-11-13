@@ -1,45 +1,21 @@
-
 name: Build APK
-
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-
+on: [push, workflow_dispatch]
 jobs:
   build:
-    runs-on: ubuntu-24.04
-
+    runs-on: ubuntu-latest
     steps:
-      - name: Baixar projeto
-        uses: actions/checkout@v5
-
-      - name: Configurar Java
-        uses: actions/setup-java@v5
+      - uses: actions/checkout@v4
+      - run: unzip -q ZerounAutomed.zip -d ZerounAutomed
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
-
-      - name: Configurar Android SDK
-        uses: android-actions/setup-android@v4
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
         with:
-          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
-
-      - name: Configurar Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
-
-      - name: Extrair projeto
-        run: unzip -q ZerounAutomed.zip
-
-      - name: Compilar APK
+          gradle-version: 8.7
+      - run: gradle assembleDebug --no-daemon
         working-directory: ZerounAutomed
-        run: gradle assembleDebug --no-daemon
-
-      - name: Salvar APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: ZEROUN-AUTOMED-apk
+          name: app-debug
           path: ZerounAutomed/app/build/outputs/apk/debug/app-debug.apk

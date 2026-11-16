@@ -1,0 +1,71 @@
+name: Lançar app
+
+# Sempre que você subir mudanças da pasta app/ (ou dos arquivos do Gradle), o GitHub
+# compila o APK, escolhe o número da versão e publica a Release sozinho.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+  workflow_dispatch:   # também dá pra rodar à mão: aba Actions > Lançar app > Run workflow
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lancar
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Escolher o número da versão
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base=$(grep -oP 'val versaoBase = "\K[0-9]+\.[0-9]+\.[0-9]+' app/build.gradle.kts)
+          ultima=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null | sed 's/^[vV]//' || true)
+          cod() { IFS=. read -r a b c <<< "$1"; echo $((a*10000 + b*100 + c)); }
+          if [ -z "$ultima" ] || [ "$(cod "$base")" -gt "$(cod "$ultima")" ]; then
+            novo="$base"
+          else
+            IFS=. read -r a b c <<< "$ultima"
+            c=$((c+1))
+            if [ "$c" -gt 99 ]; then c=0; b=$((b+1)); fi
+            if [ "$b" -gt 99 ]; then b=0; a=$((a+1)); fi
+            novo="$a.$b.$c"
+          fi
+          echo "Última release: ${ultima:-nenhuma} | Nova versão: $novo"
+          echo "versao=$novo" >> "$GITHUB_OUTPUT"
+
+      - name: Compilar o APK
+        run: gradle :app:assembleDebug -PversaoApp=${{ steps.v.outputs.versao }} --no-daemon --stacktrace
+
+      - name: Publicar a Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ steps.v.outputs.versao }}"
+          cp app/build/outputs/apk/debug/app-debug.apk "ZEROUN-AUTOMED-$v.apk"
+          notas="$(git log -1 --pretty=%B)"
+          gh release create "v$v" "ZEROUN-AUTOMED-$v.apk" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$v" --notes "${notas:-Atualização $v}"

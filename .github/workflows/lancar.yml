@@ -1,11 +1,17 @@
-name: Lançar app
+name: 🚀 Lançar app
 
-# Sempre que você subir mudanças da pasta app/ (ou dos arquivos do Gradle), o GitHub
-# compila o APK, escolhe o número da versão e publica a Release sozinho.
+# VOCÊ só sobe o .zip do projeto no GitHub (branch main). O resto é automático:
+#   1) acha o .zip mais recente do repositório
+#   2) extrai, compila o APK
+#   3) escolhe o número da versão (1 acima da última Release)
+#   4) cria a Release com o APK anexado
+# O app, ao tocar em "Procurar atualização" (ou sozinho, a cada ~15 min), já enxerga a Release nova.
 on:
   push:
     branches: [main]
     paths:
+      - '**.zip'
+      - '**.ZIP'
       - 'app/**'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
@@ -21,9 +27,52 @@ concurrency:
 
 jobs:
   apk:
+    name: 📱 Compilar e publicar
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 📦 Preparar o código-fonte (do .zip, ou da pasta app/ se não houver .zip novo)
+        id: src
+        run: |
+          set -e
+          rm -rf /tmp/fonte && mkdir -p /tmp/fonte
+          # .zip commitado por último (o que você acabou de subir)
+          zip_novo=""; melhor=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            t=$(git log -1 --format=%ct -- "$f")
+            if [ "$t" -gt "$melhor" ]; then melhor=$t; zip_novo="$f"; fi
+          done < <(git ls-files '*.zip' '*.ZIP')
+
+          # Usa o .zip se ele foi mexido no push atual; senão usa as pastas soltas do repositório.
+          usar_zip=0
+          if [ -n "$zip_novo" ]; then
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ ! -f app/build.gradle.kts ]; then
+              usar_zip=1
+            elif git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" 2>/dev/null | grep -qxF "$zip_novo"; then
+              usar_zip=1
+            elif [ ! -f app/build.gradle.kts ]; then
+              usar_zip=1
+            fi
+          fi
+
+          if [ "$usar_zip" = "1" ]; then
+            echo "Usando o zip: $zip_novo"
+            unzip -q -o "$zip_novo" -d /tmp/fonte -x '__MACOSX/*'
+            raiz=$(dirname "$(find /tmp/fonte -name settings.gradle.kts -not -path '*/__MACOSX/*' | head -n1)")
+          else
+            echo "Usando os arquivos soltos do repositório"
+            raiz="$GITHUB_WORKSPACE"
+          fi
+          if [ ! -f "$raiz/settings.gradle.kts" ] || [ ! -f "$raiz/app/build.gradle.kts" ]; then
+            echo "::error::Não achei settings.gradle.kts / app/build.gradle.kts dentro do zip. Suba o zip do projeto inteiro."
+            exit 1
+          fi
+          echo "raiz=$raiz" >> "$GITHUB_OUTPUT"
+          echo "zip=$zip_novo" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-java@v4
         with:
@@ -36,13 +85,15 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Escolher o número da versão
+      - name: 🔢 Escolher o número da versão
         id: v
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          base=$(grep -oP 'val versaoBase = "\K[0-9]+\.[0-9]+\.[0-9]+' app/build.gradle.kts)
-          ultima=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null | sed 's/^[vV]//' || true)
+          base=$(grep -oP 'val versaoBase = "\K[0-9]+\.[0-9]+\.[0-9]+' "${{ steps.src.outputs.raiz }}/app/build.gradle.kts")
+          ultima=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName -q '.[].tagName' 2>/dev/null \
+                   | sed 's/^[vV]//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+                   | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1 || true)
           cod() { IFS=. read -r a b c <<< "$1"; echo $((a*10000 + b*100 + c)); }
           if [ -z "$ultima" ] || [ "$(cod "$base")" -gt "$(cod "$ultima")" ]; then
             novo="$base"
@@ -56,16 +107,32 @@ jobs:
           echo "Última release: ${ultima:-nenhuma} | Nova versão: $novo"
           echo "versao=$novo" >> "$GITHUB_OUTPUT"
 
-      - name: Compilar o APK
+      - name: 🔨 Compilar o APK
+        working-directory: ${{ steps.src.outputs.raiz }}
         run: gradle :app:assembleDebug -PversaoApp=${{ steps.v.outputs.versao }} --no-daemon --stacktrace
 
-      - name: Publicar a Release
+      - name: 🎁 Criar a Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           v="${{ steps.v.outputs.versao }}"
-          cp app/build/outputs/apk/debug/app-debug.apk "ZEROUN-AUTOMED-$v.apk"
-          notas="$(git log -1 --pretty=%B)"
+          cp "${{ steps.src.outputs.raiz }}/app/build/outputs/apk/debug/app-debug.apk" "ZEROUN-AUTOMED-$v.apk"
+          notas="$(git log -1 --pretty=%B | sed '/^Co-Authored-By/d')"
           gh release create "v$v" "ZEROUN-AUTOMED-$v.apk" \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "$v" --notes "${notas:-Atualização $v}"
+            --title "$v" --notes "${notas:-Atualização $v}" --latest
+
+      - name: 📋 Resumo
+        run: |
+          v="${{ steps.v.outputs.versao }}"
+          {
+            echo "## ✅ Release v$v publicada"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| 📱 Versão | **$v** |"
+            echo "| 📦 Origem | \`${{ steps.src.outputs.zip || 'pasta app/' }}\` |"
+            echo "| 🔗 Release | https://github.com/$GITHUB_REPOSITORY/releases/tag/v$v |"
+            echo ""
+            echo "Agora é só tocar em **Procurar atualização** no app."
+          } >> "$GITHUB_STEP_SUMMARY"
